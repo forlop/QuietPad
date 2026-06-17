@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>QuietPad</title>
+  </head>
+  <body>
+    <div id="app">
+      <header class="titlebar">
+        <div class="brand">
+          <strong>QuietPad</strong>
+          <span id="file-name">Untitled</span>
+        </div>
+        <nav class="toolbar" aria-label="Editor actions">
+          <button id="new-file" type="button">New</button>
+          <button id="open-file" type="button">Open</button>
+          <button id="save-file" type="button">Save</button>
+          <button id="save-as-file" type="button">Save As</button>
+          <button id="find-toggle" type="button">Find</button>
+          <label class="select-label">
+            <span>Language</span>
+            <select id="language-select">
+              <option value="auto">Auto</option>
+              <option value="text">Text</option>
+              <option value="powershell">PowerShell</option>
+              <option value="batch">Batch</option>
+              <option value="markdown">Markdown</option>
+            </select>
+          </label>
+          <label class="check-label">
+            <input id="wrap-toggle" type="checkbox" checked />
+            Wrap
+          </label>
+          <button id="theme-toggle" type="button" aria-pressed="false">Light</button>
+          <button id="assistant-toggle" type="button" aria-pressed="false">Assistant</button>
+        </nav>
+      </header>
+
+      <section id="find-panel" class="find-panel" hidden>
+        <input id="find-input" type="search" placeholder="Find" spellcheck="false" />
+        <input id="replace-input" type="text" placeholder="Replace" spellcheck="false" />
+        <button id="find-previous" type="button">Previous</button>
+        <button id="find-next" type="button">Next</button>
+        <button id="replace-next" type="button">Replace</button>
+        <button id="replace-all" type="button">All</button>
+        <button id="find-close" type="button">Close</button>
+      </section>
+
+      <main class="workspace">
+        <div id="editor" class="editor-host"></div>
+        <aside id="assistant-panel" class="assistant-panel" hidden>
+          <div>
+            <h2>Assistant later</h2>
+            <p>QuietPad is shaped for a future local or OpenAI-compatible endpoint.</p>
+          </div>
+          <label>
+            Endpoint
+            <input type="text" value="http://localhost:11434/v1" disabled />
+          </label>
+          <label>
+            Model
+            <input type="text" value="not connected in MVP" disabled />
+          </label>
+          <button type="button" disabled>Ask about selection</button>
+        </aside>
+      </main>
+
+      <footer class="statusbar">
+        <span class="status-left-group">
+          <span id="status-left">Ready</span>
+          <button id="reload-external" class="status-action" type="button" hidden>Reload</button>
+          <button id="ignore-external" class="status-action" type="button" hidden>Ignore</button>
+        </span>
+        <span id="status-right">Ln 1, Col 1</span>
+      </footer>
+    </div>
+
+    <div id="modal-overlay" class="modal-overlay" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+        <p id="modal-title">You have unsaved changes.</p>
+        <div class="modal-actions">
+          <button id="modal-save" type="button">Save</button>
+          <button id="modal-discard" type="button">Don't Save</button>
+          <button id="modal-cancel" type="button">Cancel</button>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

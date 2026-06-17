@@ -1,0 +1,8 @@
+# Build off the Dropbox-synced tree. Dropbox locks files in `target/` mid-sync,
+# which intermittently breaks the linker (LNK1114) and archive step (os error 32).
+# Keep the repo on Dropbox for portability; keep build output on a local disk.
+#
+# Machine-specific: if D:\work does not exist on this box, change the path below
+# (or delete this file to fall back to the in-tree ./target).
+[build]
+target-dir = "D:/work/quietpad-target"

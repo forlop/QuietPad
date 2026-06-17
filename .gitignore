@@ -1,0 +1,9 @@
+node_modules
+dist
+src-tauri/target
+*.log
+
+# Build outputs — reproducible via build.ps1, distributed via Dropbox, not tracked
+installers/
+portable/QuietPad.exe
+QuietPad_*_portable.zip
