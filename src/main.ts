@@ -24,9 +24,20 @@ import {
 } from "@codemirror/search";
 import { HighlightStyle, StreamLanguage, syntaxHighlighting } from "@codemirror/language";
 import { markdown } from "@codemirror/lang-markdown";
+import { json } from "@codemirror/lang-json";
+import { yaml } from "@codemirror/lang-yaml";
+import { python } from "@codemirror/lang-python";
+import { sql } from "@codemirror/lang-sql";
+import { r as rMode } from "@codemirror/legacy-modes/mode/r";
+import { shell as shellMode } from "@codemirror/legacy-modes/mode/shell";
+import { toml as tomlMode } from "@codemirror/legacy-modes/mode/toml";
+import { properties as propertiesMode } from "@codemirror/legacy-modes/mode/properties";
+import { diff as diffMode } from "@codemirror/legacy-modes/mode/diff";
 import { tags as t } from "@lezer/highlight";
 
-type LanguageId = "auto" | "text" | "powershell" | "batch" | "markdown";
+type LanguageId =
+  | "auto" | "text" | "powershell" | "batch" | "markdown"
+  | "json" | "yaml" | "python" | "sql" | "r" | "shell" | "toml" | "ini" | "diff" | "stata";
 type UnsavedChoice = "save" | "discard" | "cancel";
 type ViewMode = "edit" | "split" | "preview";
 type PreviewKind = "markdown" | "csv" | "tsv" | "json" | "svg" | "code";
@@ -123,6 +134,49 @@ const batchLanguage = StreamLanguage.define({
     return null;
   },
   startState: () => ({ lineStart: true })
+});
+
+// Legacy CodeMirror stream modes (same lightweight style as the two above).
+const rLanguage = StreamLanguage.define(rMode);
+const shellLanguage = StreamLanguage.define(shellMode);
+const tomlLanguage = StreamLanguage.define(tomlMode);
+const iniLanguage = StreamLanguage.define(propertiesMode);
+const diffLanguage = StreamLanguage.define(diffMode);
+
+// Stata has no CodeMirror mode, so this is a hand-written one for .do/.ado:
+// * and //-comments, /* */ blocks, `local' and $global macros, strings, and
+// the common command/keyword set.
+const stataKeywords =
+  /\b(?:if|else|in|of|by|bysort|foreach|forvalues|forv|while|continue|break|program|end|return|exit|version|capture|cap|quietly|qui|noisily|preserve|restore|use|save|clear|generate|gen|egen|replace|drop|keep|rename|ren|recode|encode|decode|destring|tostring|label|merge|append|collapse|reshape|sort|gsort|order|format|compress|import|export|insheet|outsheet|infile|regress|reg|summarize|sum|summ|tabulate|tab|tabstat|table|correlate|corr|pwcorr|ttest|anova|logit|logistic|probit|poisson|ivregress|xtreg|areg|margins|predict|estimates|est|test|lincom|display|di|list|count|describe|desc|codebook|assert|scalar|matrix|mat|local|global|macro|tempvar|tempname|tempfile|set|char|mata|python)\b/;
+
+interface StataState { block: boolean; sol: boolean; }
+const stataLanguage = StreamLanguage.define<StataState>({
+  startState: () => ({ block: false, sol: true }),
+  token(stream, state) {
+    if (state.block) {
+      if (stream.match(/.*?\*\//)) state.block = false;
+      else stream.skipToEnd();
+      return "comment";
+    }
+    if (stream.sol()) state.sol = true;
+    if (stream.eatSpace()) return null;
+    const atLineStart = state.sol;
+    state.sol = false;
+    if (stream.match(/\/\*/)) {
+      if (!stream.match(/.*?\*\//)) { state.block = true; stream.skipToEnd(); }
+      return "comment";
+    }
+    if (stream.match(/\/\/.*/)) return "comment";
+    if (atLineStart && stream.match(/\*.*/)) return "comment";
+    if (stream.match(/`"(?:[^"]|"(?!'))*"'/)) return "string";
+    if (stream.match(/"(?:[^"\\]|\\.)*"?/)) return "string";
+    if (stream.match(/`[^'`]*'/)) return "variableName";
+    if (stream.match(/\$\{[^}]*\}/) || stream.match(/\$[A-Za-z_]\w*/)) return "variableName";
+    if (stream.match(stataKeywords)) return "keyword";
+    if (stream.match(/\b\d+(?:\.\d+)?\b/)) return "number";
+    stream.next();
+    return null;
+  }
 });
 
 function escapeRegExp(value: string) {
@@ -299,9 +353,11 @@ function previewKind(): PreviewKind {
 
 function hljsLanguage(): string | null {
   const language = chosenLanguage === "auto" ? detectLanguage(currentPath) : chosenLanguage;
-  if (language === "powershell") return "powershell";
-  if (language === "batch") return "dos";
-  return null;
+  const map: Partial<Record<LanguageId, string>> = {
+    powershell: "powershell", batch: "dos", python: "python", sql: "sql",
+    yaml: "yaml", r: "r", shell: "bash", toml: "ini", ini: "ini", diff: "diff", stata: "stata"
+  };
+  return map[language] ?? null;
 }
 
 function renderMarkdownHtml(text: string, target: "preview" | "export"): string {
@@ -589,18 +645,43 @@ const view = new EditorView({
 
 function languageExtension(): Extension {
   const language = chosenLanguage === "auto" ? detectLanguage(currentPath) : chosenLanguage;
-  if (language === "markdown") return markdown();
-  if (language === "powershell") return powershellLanguage;
-  if (language === "batch") return batchLanguage;
-  return [];
+  switch (language) {
+    case "markdown": return markdown();
+    case "powershell": return powershellLanguage;
+    case "batch": return batchLanguage;
+    case "json": return json();
+    case "yaml": return yaml();
+    case "python": return python();
+    case "sql": return sql();
+    case "r": return rLanguage;
+    case "shell": return shellLanguage;
+    case "toml": return tomlLanguage;
+    case "ini": return iniLanguage;
+    case "diff": return diffLanguage;
+    case "stata": return stataLanguage;
+    default: return [];
+  }
 }
 
 function detectLanguage(path: string | null): Exclude<LanguageId, "auto"> {
   const lower = path?.toLowerCase() ?? "";
-  if (lower.endsWith(".ps1") || lower.endsWith(".psm1") || lower.endsWith(".psd1")) return "powershell";
-  if (lower.endsWith(".bat") || lower.endsWith(".cmd")) return "batch";
-  if (lower.endsWith(".md") || lower.endsWith(".markdown")) return "markdown";
-  return "text";
+  const ext = lower.includes(".") ? lower.slice(lower.lastIndexOf(".") + 1) : "";
+  switch (ext) {
+    case "ps1": case "psm1": case "psd1": return "powershell";
+    case "bat": case "cmd": return "batch";
+    case "md": case "markdown": return "markdown";
+    case "json": return "json";
+    case "yaml": case "yml": return "yaml";
+    case "py": case "pyw": return "python";
+    case "sql": return "sql";
+    case "r": return "r";
+    case "sh": case "bash": return "shell";
+    case "toml": return "toml";
+    case "ini": case "cfg": case "conf": return "ini";
+    case "diff": case "patch": return "diff";
+    case "do": case "ado": return "stata";
+    default: return "text";
+  }
 }
 
 function replaceDocument(text: string) {
@@ -838,7 +919,7 @@ async function openFile() {
   const selected = await open({
     multiple: false,
     filters: [
-      { name: "Text files", extensions: ["txt", "md", "markdown", "ps1", "psm1", "psd1", "bat", "cmd", "json", "csv", "tsv", "svg", "log"] },
+      { name: "Text files", extensions: ["txt", "md", "markdown", "ps1", "psm1", "psd1", "bat", "cmd", "do", "ado", "py", "pyw", "r", "sql", "sh", "bash", "json", "yaml", "yml", "toml", "ini", "cfg", "conf", "csv", "tsv", "svg", "diff", "patch", "log"] },
       { name: "All files", extensions: ["*"] }
     ]
   });

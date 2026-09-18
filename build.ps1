@@ -28,8 +28,16 @@ if (Test-Path $cfg) {
 if (-not (Test-Path $targetDir)) { New-Item -ItemType Directory -Force -Path $targetDir | Out-Null }
 
 Write-Host "Building (target-dir: $targetDir) ..." -ForegroundColor Cyan
-npm run tauri:build
-if ($LASTEXITCODE -ne 0) { throw "tauri build failed (exit $LASTEXITCODE)" }
+# Vite's emptyDir on dist/ intermittently loses to Dropbox syncing that folder,
+# failing the build. The lock is transient, so retry a couple of times.
+$maxAttempts = 3
+for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+    npm run tauri:build
+    if ($LASTEXITCODE -eq 0) { break }
+    if ($attempt -eq $maxAttempts) { throw "tauri build failed after $maxAttempts attempts (exit $LASTEXITCODE)" }
+    Write-Host "Build failed (likely a Dropbox lock on dist/); retrying $attempt/$maxAttempts..." -ForegroundColor Yellow
+    Start-Sleep -Seconds 3
+}
 
 $rel = Join-Path $targetDir "release"
 $setup = Join-Path $rel "bundle\nsis\QuietPad_0.1.0_x64-setup.exe"
