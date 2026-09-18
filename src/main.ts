@@ -1,8 +1,15 @@
 import "./styles.css";
+import "katex/dist/katex.min.css";
+import katexCss from "katex/dist/katex.min.css?inline";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import markdownit from "markdown-it";
+import hljs from "highlight.js";
+import katex from "katex";
+import TurndownService from "turndown";
+import { gfm } from "turndown-plugin-gfm";
 import { EditorState, Compartment, Extension, RangeSetBuilder, StateEffect, StateField } from "@codemirror/state";
 import { Decoration, DecorationSet, EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
@@ -21,6 +28,8 @@ import { tags as t } from "@lezer/highlight";
 
 type LanguageId = "auto" | "text" | "powershell" | "batch" | "markdown";
 type UnsavedChoice = "save" | "discard" | "cancel";
+type ViewMode = "edit" | "split" | "preview";
+type PreviewKind = "markdown" | "csv" | "tsv" | "json" | "svg" | "code";
 
 const editorHost = document.querySelector<HTMLDivElement>("#editor")!;
 const fileName = document.querySelector<HTMLSpanElement>("#file-name")!;
@@ -41,6 +50,9 @@ const modalTitle = document.querySelector<HTMLParagraphElement>("#modal-title")!
 const modalSave = document.querySelector<HTMLButtonElement>("#modal-save")!;
 const modalDiscard = document.querySelector<HTMLButtonElement>("#modal-discard")!;
 const modalCancel = document.querySelector<HTMLButtonElement>("#modal-cancel")!;
+const previewPane = document.querySelector<HTMLElement>("#preview-pane")!;
+const viewSelect = document.querySelector<HTMLSelectElement>("#view-select")!;
+const exportSelect = document.querySelector<HTMLSelectElement>("#export-select")!;
 
 const languageCompartment = new Compartment();
 const wrapCompartment = new Compartment();
@@ -50,6 +62,7 @@ const setFindText = StateEffect.define<string>();
 let currentPath: string | null = null;
 let cleanText = "";
 let chosenLanguage: LanguageId = "auto";
+let viewMode: ViewMode = "edit";
 let theme: "dark" | "light" = "dark";
 let closeConfirmed = false;
 let lastDiskSignature: string | null = null;
@@ -155,8 +168,351 @@ const findHighlightField = StateField.define<{ query: string; decorations: Decor
   provide: (field) => EditorView.decorations.from(field, (value) => value.decorations)
 });
 
+// ---------------------------------------------------------------------------
+// Preview + export
+//
+// The preview pane renders the current buffer read-only. What "render" means
+// depends on the file: Markdown -> formatted HTML, CSV/TSV -> a table, JSON ->
+// a collapsible tree, SVG -> the image, anything else -> a highlighted code
+// listing. Export prints whatever the preview shows to PDF (A4) or HTML.
+// ---------------------------------------------------------------------------
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+let imageRenderTarget: "preview" | "export" = "preview";
+
+function isRemoteOrEmbeddedSource(src: string): boolean {
+  return /^(?:[a-z][a-z\d+.-]*:|\/\/|#)/i.test(src);
+}
+
+function isAbsolutePath(src: string): boolean {
+  return /^[a-zA-Z]:[\\/]/.test(src) || /^\\\\/.test(src) || src.startsWith("/");
+}
+
+function documentDirectory(): string | null {
+  if (!currentPath) return null;
+  const cut = Math.max(currentPath.lastIndexOf("\\"), currentPath.lastIndexOf("/"));
+  return cut >= 0 ? currentPath.slice(0, cut) : null;
+}
+
+function resolveImagePath(src: string): string {
+  let normalized = src;
+  try {
+    normalized = decodeURI(src);
+  } catch {
+    normalized = src;
+  }
+  if (isAbsolutePath(normalized)) return normalized;
+  const dir = documentDirectory();
+  if (!dir) return src;
+  const separator = dir.includes("\\") ? "\\" : "/";
+  return `${dir}${separator}${normalized.replace(/[\\/]/g, separator)}`;
+}
+
+function fileUrlFromPath(filePath: string): string {
+  const normalized = filePath.replaceAll("\\", "/").replaceAll("#", "%23");
+  return normalized.startsWith("/") ? `file://${normalized}` : `file:///${normalized}`;
+}
+
+function resolveImageSource(src: string, target: "preview" | "export"): string {
+  if (isRemoteOrEmbeddedSource(src)) return src;
+  const resolved = resolveImagePath(src);
+  return target === "export" ? fileUrlFromPath(resolved) : convertFileSrc(resolved);
+}
+
+function renderLatex(source: string, displayMode: boolean): string {
+  try {
+    return katex.renderToString(source, { displayMode, throwOnError: false, errorColor: "#c0563d" });
+  } catch {
+    return escapeHtml(source);
+  }
+}
+
+const md = markdownit({
+  html: false,
+  linkify: true,
+  typographer: true,
+  breaks: false,
+  highlight(code, language) {
+    if (language && hljs.getLanguage(language)) {
+      try {
+        return `<pre class="hljs"><code>${hljs.highlight(code, { language }).value}</code></pre>`;
+      } catch {
+        /* fall through */
+      }
+    }
+    return `<pre class="hljs"><code>${escapeHtml(code)}</code></pre>`;
+  }
+});
+
+// $inline$ and $$block$$ math via KaTeX.
+md.inline.ruler.after("escape", "math_inline", (state, silent) => {
+  if (state.src[state.pos] !== "$" || state.src[state.pos + 1] === "$") return false;
+  const start = state.pos + 1;
+  const end = state.src.indexOf("$", start);
+  if (end === -1 || end === start) return false;
+  if (!silent) {
+    const token = state.push("math_inline", "math", 0);
+    token.content = state.src.slice(start, end);
+  }
+  state.pos = end + 1;
+  return true;
+});
+md.renderer.rules.math_inline = (tokens, index) => renderLatex(tokens[index].content, false);
+md.renderer.rules.math_block = (tokens, index) => `<p class="math-block">${renderLatex(tokens[index].content, true)}</p>\n`;
+
+const defaultImageRenderer =
+  md.renderer.rules.image ??
+  ((tokens, index, options, _env, self) => self.renderToken(tokens, index, options));
+md.renderer.rules.image = (tokens, index, options, env, self) => {
+  const src = tokens[index].attrGet("src");
+  if (typeof src === "string") tokens[index].attrSet("src", resolveImageSource(src, imageRenderTarget));
+  return defaultImageRenderer(tokens, index, options, env, self);
+};
+
+const turndown = new TurndownService({
+  headingStyle: "atx",
+  codeBlockStyle: "fenced",
+  emDelimiter: "*",
+  bulletListMarker: "-"
+});
+turndown.use(gfm);
+
+function previewKind(): PreviewKind {
+  const lower = currentPath?.toLowerCase() ?? "";
+  if (lower.endsWith(".md") || lower.endsWith(".markdown")) return "markdown";
+  if (lower.endsWith(".csv")) return "csv";
+  if (lower.endsWith(".tsv")) return "tsv";
+  if (lower.endsWith(".json")) return "json";
+  if (lower.endsWith(".svg")) return "svg";
+  if (chosenLanguage === "markdown") return "markdown";
+  return "code";
+}
+
+function hljsLanguage(): string | null {
+  const language = chosenLanguage === "auto" ? detectLanguage(currentPath) : chosenLanguage;
+  if (language === "powershell") return "powershell";
+  if (language === "batch") return "dos";
+  return null;
+}
+
+function renderMarkdownHtml(text: string, target: "preview" | "export"): string {
+  imageRenderTarget = target;
+  try {
+    return md.render(text);
+  } finally {
+    imageRenderTarget = "preview";
+  }
+}
+
+// Minimal RFC-4180-ish parser: honors quoted fields and "" escapes.
+function parseDelimited(text: string, delimiter: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = "";
+  let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quoted) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; } else { quoted = false; }
+      } else {
+        field += ch;
+      }
+    } else if (ch === '"') {
+      quoted = true;
+    } else if (ch === delimiter) {
+      row.push(field); field = "";
+    } else if (ch === "\n") {
+      row.push(field); field = ""; rows.push(row); row = [];
+    } else if (ch !== "\r") {
+      field += ch;
+    }
+  }
+  if (field.length > 0 || row.length > 0) { row.push(field); rows.push(row); }
+  return rows.filter((r) => r.length > 1 || (r.length === 1 && r[0] !== ""));
+}
+
+function renderTableHtml(text: string, delimiter: string): string {
+  const rows = parseDelimited(text, delimiter);
+  if (!rows.length) return `<p class="preview-empty">No rows.</p>`;
+  const [head, ...body] = rows;
+  const ths = head.map((c) => `<th>${escapeHtml(c)}</th>`).join("");
+  const trs = body
+    .map((r) => `<tr>${r.map((c) => `<td>${escapeHtml(c)}</td>`).join("")}</tr>`)
+    .join("");
+  return `<table class="data-table"><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
+}
+
+function renderJsonNode(value: unknown): string {
+  if (value === null) return `<span class="json-null">null</span>`;
+  if (typeof value === "string") return `<span class="json-string">${escapeHtml(JSON.stringify(value))}</span>`;
+  if (typeof value === "number") return `<span class="json-number">${value}</span>`;
+  if (typeof value === "boolean") return `<span class="json-bool">${value}</span>`;
+  if (Array.isArray(value)) {
+    if (value.length === 0) return `<span class="json-punct">[]</span>`;
+    const items = value
+      .map((item) => `<li>${renderJsonNode(item)}</li>`)
+      .join("");
+    return `<details open class="json-branch"><summary><span class="json-punct">[</span> <span class="json-count">${value.length}</span> <span class="json-punct">]</span></summary><ul>${items}</ul></details>`;
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length === 0) return `<span class="json-punct">{}</span>`;
+  const items = entries
+    .map(([k, v]) => `<li><span class="json-key">${escapeHtml(JSON.stringify(k))}</span><span class="json-punct">: </span>${renderJsonNode(v)}</li>`)
+    .join("");
+  return `<details open class="json-branch"><summary><span class="json-punct">{</span> <span class="json-count">${entries.length}</span> <span class="json-punct">}</span></summary><ul>${items}</ul></details>`;
+}
+
+function renderJsonHtml(text: string): string {
+  if (!text.trim()) return `<p class="preview-empty">Empty.</p>`;
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch (error) {
+    return `<p class="preview-error">Invalid JSON: ${escapeHtml(String(error))}</p>`;
+  }
+  return `<div class="json-view">${renderJsonNode(value)}</div>`;
+}
+
+function renderSvgHtml(text: string): string {
+  // Drop scripts / on* handlers before injecting the user's SVG markup.
+  const safe = text
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/\son\w+\s*=\s*"[^"]*"/gi, "")
+    .replace(/\son\w+\s*=\s*'[^']*'/gi, "");
+  return `<div class="svg-view">${safe}</div>`;
+}
+
+function renderCodeHtml(text: string): string {
+  const language = hljsLanguage();
+  let inner: string;
+  if (language && hljs.getLanguage(language)) {
+    try {
+      inner = hljs.highlight(text, { language }).value;
+    } catch {
+      inner = escapeHtml(text);
+    }
+  } else {
+    inner = escapeHtml(text);
+  }
+  return `<pre class="hljs code-listing"><code>${inner}</code></pre>`;
+}
+
+function renderPreviewHtml(text: string, kind: PreviewKind, target: "preview" | "export"): string {
+  switch (kind) {
+    case "markdown": return renderMarkdownHtml(text, target);
+    case "csv": return renderTableHtml(text, ",");
+    case "tsv": return renderTableHtml(text, "\t");
+    case "json": return renderJsonHtml(text);
+    case "svg": return renderSvgHtml(text);
+    default: return renderCodeHtml(text);
+  }
+}
+
+function renderPreview() {
+  if (viewMode === "edit") return;
+  previewPane.innerHTML = renderPreviewHtml(currentText(), previewKind(), "preview");
+}
+
+function applyViewMode(mode: ViewMode) {
+  viewMode = mode;
+  document.body.dataset.view = mode;
+  viewSelect.value = mode;
+  renderPreview();
+}
+
+function exportName(extension: string): string {
+  const base = currentPath ? displayName(currentPath).replace(/\.[^.]+$/, "") : "document";
+  return `${base}.${extension}`;
+}
+
+function buildExportDocument(): string {
+  const bodyHtml = renderPreviewHtml(currentText(), previewKind(), "export");
+  const title = escapeHtml(currentPath ? displayName(currentPath) : "QuietPad document");
+  return `<!doctype html>
+<html lang="en"><head><meta charset="UTF-8"><title>${title}</title>
+<style>${katexCss}</style>
+<style>
+  @page { size: A4; margin: 16mm; }
+  body { margin: 0; color: #1c1a16; background: #ffffff;
+    font-family: Georgia, "Times New Roman", serif; line-height: 1.7; }
+  main { max-width: 100%; }
+  h1, h2, h3, h4 { line-height: 1.25; }
+  pre { overflow: auto; padding: 12px 14px; border-radius: 8px; background: #f4efe8;
+    font-family: Consolas, "Courier New", monospace; font-size: 12.5px; white-space: pre-wrap;
+    word-break: break-word; }
+  code { font-family: Consolas, "Courier New", monospace; }
+  pre code { background: transparent; }
+  :not(pre) > code { padding: 0.12em 0.35em; border-radius: 4px; background: #f0e9df; }
+  blockquote { margin: 1rem 0; padding: 0.2rem 1rem; border-left: 3px solid #a14f2a;
+    background: rgba(242, 215, 199, 0.35); }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 13px; }
+  th, td { padding: 7px 10px; border: 1px solid #cfc7b8; text-align: left; vertical-align: top; }
+  th { background: #f0e9df; }
+  img { max-width: 100%; height: auto; }
+  .svg-view svg { max-width: 100%; height: auto; }
+  .json-view { font-family: Consolas, "Courier New", monospace; font-size: 12.5px; }
+  .json-view ul { list-style: none; margin: 0; padding-left: 1.2em; }
+  .json-key { color: #7f4f8f; } .json-string { color: #9d3f3a; }
+  .json-number { color: #27745f; } .json-bool { color: #27745f; } .json-null { color: #8b6128; }
+  .katex-display { overflow-x: auto; }
+</style></head>
+<body><main>${bodyHtml}</main></body></html>`;
+}
+
+async function exportPdf() {
+  const target = await save({
+    defaultPath: exportName("pdf"),
+    filters: [{ name: "PDF", extensions: ["pdf"] }]
+  });
+  if (!target) return;
+  try {
+    await invoke("export_pdf", { targetPath: target, html: buildExportDocument() });
+    clearError();
+  } catch (error) {
+    showError(String(error));
+  }
+}
+
+async function exportHtml() {
+  const target = await save({
+    defaultPath: exportName("html"),
+    filters: [{ name: "HTML", extensions: ["html"] }]
+  });
+  if (!target) return;
+  try {
+    await writeFile(target, buildExportDocument());
+    clearError();
+  } catch (error) {
+    showError(String(error));
+  }
+}
+
+// Paste-as-Markdown: when editing Markdown, rich HTML on the clipboard (an AI
+// answer, a web selection) is converted to Markdown source instead of pasted raw.
+const markdownPaste = EditorView.domEventHandlers({
+  paste(event, editorView) {
+    if (previewKind() !== "markdown") return false;
+    const html = event.clipboardData?.getData("text/html");
+    if (!html) return false;
+    event.preventDefault();
+    const markdownText = turndown.turndown(html).trim();
+    editorView.dispatch(editorView.state.replaceSelection(markdownText));
+    return true;
+  }
+});
+
 function baseExtensions(): Extension[] {
   return [
+    markdownPaste,
     lineNumbers(),
     highlightActiveLineGutter(),
     history(),
@@ -166,7 +522,10 @@ function baseExtensions(): Extension[] {
     search({ top: true }),
     keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
     EditorView.updateListener.of((update) => {
-      if (update.docChanged) updateDirtyState();
+      if (update.docChanged) {
+        updateDirtyState();
+        if (viewMode !== "edit") renderPreview();
+      }
       if (update.selectionSet || update.docChanged) updateCursorStatus();
     }),
     languageCompartment.of(languageExtension()),
@@ -433,7 +792,7 @@ async function openFile() {
   const selected = await open({
     multiple: false,
     filters: [
-      { name: "Text files", extensions: ["txt", "md", "markdown", "ps1", "psm1", "psd1", "bat", "cmd", "json", "log"] },
+      { name: "Text files", extensions: ["txt", "md", "markdown", "ps1", "psm1", "psd1", "bat", "cmd", "json", "csv", "tsv", "svg", "log"] },
       { name: "All files", extensions: ["*"] }
     ]
   });
@@ -541,6 +900,18 @@ document.querySelector("#replace-all")?.addEventListener("click", () => {
 languageSelect.addEventListener("change", () => {
   chosenLanguage = languageSelect.value as LanguageId;
   reconfigureLanguage();
+  renderPreview();
+});
+
+viewSelect.addEventListener("change", () => {
+  applyViewMode(viewSelect.value as ViewMode);
+});
+
+exportSelect.addEventListener("change", () => {
+  const choice = exportSelect.value;
+  exportSelect.value = "";
+  if (choice === "pdf") void exportPdf();
+  if (choice === "html") void exportHtml();
 });
 
 wrapToggle.addEventListener("change", () => {
@@ -594,6 +965,7 @@ void appWindow.onCloseRequested(async (event) => {
 });
 
 document.body.dataset.theme = theme;
+applyViewMode(viewMode);
 updateDirtyState();
 updateCursorStatus();
 window.setInterval(() => {

@@ -1,10 +1,10 @@
 # QuietPad
 
-QuietPad is a small Tauri + CodeMirror text editor for Windows. The MVP stays deliberately plain: open files, save files, search/replace, copy/paste, undo/redo, word wrap, line numbers, and syntax highlighting for PowerShell, batch files, and Markdown.
+QuietPad is a small Tauri + CodeMirror text editor for Windows. It stays a plain, fast editor for text and scripts, with a read-only **preview** pane for the formats where rendering helps (Markdown, CSV/TSV, JSON, SVG) and one-click export to PDF/HTML.
 
 The app is shaped so an optional LLM assistant can be added later without turning the editor into an IDE.
 
-## MVP features
+## Editor features
 
 - Open, save, and save as
 - Dirty-state indicator in the title and toolbar
@@ -13,7 +13,23 @@ The app is shaped so an optional LLM assistant can be added later without turnin
 - Word wrap toggle
 - Auto language detection for `.ps1`, `.psm1`, `.psd1`, `.bat`, `.cmd`, `.md`, and `.markdown`
 - Manual language override
+- Opens files passed by the OS (file associations / "Open with"); single-instance
 - Placeholder assistant panel for future endpoint settings
+
+## Preview, paste, and export
+
+- **View** control: Edit / Split / Preview
+- Preview renders by file type:
+  - Markdown → formatted (markdown-it, KaTeX math, highlight.js code)
+  - CSV / TSV → table
+  - JSON → collapsible tree
+  - SVG → the image
+  - anything else → a syntax-highlighted code listing
+- **Paste-as-Markdown**: when editing Markdown, rich HTML on the clipboard
+  (an AI answer, a web selection) is converted to Markdown source on paste
+  (turndown + GFM)
+- **Export** the current view to **PDF (A4)** or **HTML**. PDF is produced via
+  a headless Microsoft Edge / Chrome; A4 and margins come from CSS `@page`.
 
 ## Run
 

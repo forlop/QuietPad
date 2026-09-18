@@ -28,6 +28,22 @@
               <option value="markdown">Markdown</option>
             </select>
           </label>
+          <label class="select-label">
+            <span>View</span>
+            <select id="view-select">
+              <option value="edit">Edit</option>
+              <option value="split">Split</option>
+              <option value="preview">Preview</option>
+            </select>
+          </label>
+          <label class="select-label">
+            <span>Export</span>
+            <select id="export-select">
+              <option value="">Export…</option>
+              <option value="pdf">PDF (A4)</option>
+              <option value="html">HTML</option>
+            </select>
+          </label>
           <label class="check-label">
             <input id="wrap-toggle" type="checkbox" checked />
             Wrap
@@ -49,6 +65,7 @@
 
       <main class="workspace">
         <div id="editor" class="editor-host"></div>
+        <aside id="preview-pane" class="preview-pane" aria-label="Preview"></aside>
         <aside id="assistant-panel" class="assistant-panel" hidden>
           <div>
             <h2>Assistant later</h2>

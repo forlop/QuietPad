@@ -1,5 +1,7 @@
+use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Mutex;
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
 
 /// Read a UTF-8 text file from any path the OS lets us reach.
@@ -49,6 +51,95 @@ fn file_from_args<I: IntoIterator<Item = String>>(args: I) -> Option<String> {
     args.into_iter().skip(1).find(|a| !a.starts_with('-'))
 }
 
+/// Locate a Chromium-family browser (Edge/Chrome/Chromium/Brave) for headless
+/// PDF export. `--headless ... --print-to-pdf` is identical across them.
+fn find_chromium_browser() -> Option<PathBuf> {
+    let candidates: &[&str] = &[
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    ];
+    candidates
+        .iter()
+        .map(PathBuf::from)
+        .find(|path| path.exists())
+        .or_else(|| {
+            let names = ["msedge", "chrome", "chromium", "brave"];
+            let path_var = std::env::var_os("PATH")?;
+            names.iter().find_map(|name| {
+                std::env::split_paths(&path_var)
+                    .map(|dir| dir.join(format!("{name}.exe")))
+                    .find(|candidate| candidate.is_file())
+            })
+        })
+}
+
+/// Render an HTML document to PDF by driving a headless Chromium browser.
+/// Paper size (A4) and margins are set via CSS `@page` in the HTML itself,
+/// which is the only reliable way to control them through `--print-to-pdf`.
+#[tauri::command]
+fn export_pdf(target_path: String, html: String) -> Result<(), String> {
+    let browser = find_chromium_browser().ok_or_else(|| {
+        "PDF export needs Microsoft Edge or Google Chrome installed.".to_string()
+    })?;
+
+    let temp_dir = std::env::temp_dir();
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_millis();
+    let temp_html = temp_dir.join(format!("quietpad-export-{stamp}.html"));
+    std::fs::write(&temp_html, html).map_err(|e| e.to_string())?;
+    let profile_dir = temp_dir.join("quietpad-export-profile");
+    let _ = std::fs::create_dir_all(&profile_dir);
+
+    let normalized = temp_html.to_string_lossy().replace('\\', "/");
+    let url = if normalized.starts_with('/') {
+        format!("file://{normalized}")
+    } else {
+        format!("file:///{normalized}")
+    };
+
+    // Overwrite any stale output so we can detect a fresh write below.
+    let _ = std::fs::remove_file(&target_path);
+
+    let status = Command::new(&browser)
+        .arg("--headless=new")
+        .arg("--disable-gpu")
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check")
+        .arg(format!("--user-data-dir={}", profile_dir.to_string_lossy()))
+        .arg("--no-pdf-header-footer")
+        .arg("--print-to-pdf-no-header")
+        .arg(format!("--print-to-pdf={target_path}"))
+        .arg(&url)
+        .status()
+        .map_err(|e| e.to_string())?;
+
+    // When another browser instance is already running, the launcher hands off
+    // and returns immediately while the child writes the PDF a moment later, so
+    // wait (briefly) for the file rather than trusting the exit code alone.
+    let mut written = false;
+    for _ in 0..50 {
+        if std::fs::metadata(&target_path).map(|m| m.len() > 0).unwrap_or(false) {
+            written = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    let _ = std::fs::remove_file(&temp_html);
+
+    if !status.success() && !written {
+        return Err("The browser failed to produce the PDF.".to_string());
+    }
+    if !written {
+        return Err("PDF export timed out.".to_string());
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let launch_file = file_from_args(std::env::args());
@@ -72,7 +163,8 @@ pub fn run() {
             read_file,
             write_file,
             file_signature,
-            take_launch_file
+            take_launch_file,
+            export_pdf
         ])
         .run(tauri::generate_context!())
         .expect("error while running QuietPad");
