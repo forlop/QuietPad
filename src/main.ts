@@ -28,6 +28,8 @@ import { json } from "@codemirror/lang-json";
 import { yaml } from "@codemirror/lang-yaml";
 import { python } from "@codemirror/lang-python";
 import { sql } from "@codemirror/lang-sql";
+import { html } from "@codemirror/lang-html";
+import { xml } from "@codemirror/lang-xml";
 import { r as rMode } from "@codemirror/legacy-modes/mode/r";
 import { shell as shellMode } from "@codemirror/legacy-modes/mode/shell";
 import { toml as tomlMode } from "@codemirror/legacy-modes/mode/toml";
@@ -37,7 +39,8 @@ import { tags as t } from "@lezer/highlight";
 
 type LanguageId =
   | "auto" | "text" | "powershell" | "batch" | "markdown"
-  | "json" | "yaml" | "python" | "sql" | "r" | "shell" | "toml" | "ini" | "diff" | "stata";
+  | "json" | "yaml" | "python" | "sql" | "r" | "shell" | "toml" | "ini" | "diff" | "stata"
+  | "html" | "xml";
 type UnsavedChoice = "save" | "discard" | "cancel";
 type ViewMode = "edit" | "split" | "preview";
 type PreviewKind = "markdown" | "csv" | "tsv" | "json" | "svg" | "code";
@@ -355,7 +358,8 @@ function hljsLanguage(): string | null {
   const language = chosenLanguage === "auto" ? detectLanguage(currentPath) : chosenLanguage;
   const map: Partial<Record<LanguageId, string>> = {
     powershell: "powershell", batch: "dos", python: "python", sql: "sql",
-    yaml: "yaml", r: "r", shell: "bash", toml: "ini", ini: "ini", diff: "diff", stata: "stata"
+    yaml: "yaml", r: "r", shell: "bash", toml: "ini", ini: "ini", diff: "diff",
+    html: "xml", xml: "xml"
   };
   return map[language] ?? null;
 }
@@ -653,6 +657,8 @@ function languageExtension(): Extension {
     case "yaml": return yaml();
     case "python": return python();
     case "sql": return sql();
+    case "html": return html();
+    case "xml": return xml();
     case "r": return rLanguage;
     case "shell": return shellLanguage;
     case "toml": return tomlLanguage;
@@ -680,6 +686,8 @@ function detectLanguage(path: string | null): Exclude<LanguageId, "auto"> {
     case "ini": case "cfg": case "conf": return "ini";
     case "diff": case "patch": return "diff";
     case "do": case "ado": return "stata";
+    case "html": case "htm": return "html";
+    case "xml": return "xml";
     default: return "text";
   }
 }
@@ -919,7 +927,7 @@ async function openFile() {
   const selected = await open({
     multiple: false,
     filters: [
-      { name: "Text files", extensions: ["txt", "md", "markdown", "ps1", "psm1", "psd1", "bat", "cmd", "do", "ado", "py", "pyw", "r", "sql", "sh", "bash", "json", "yaml", "yml", "toml", "ini", "cfg", "conf", "csv", "tsv", "svg", "diff", "patch", "log"] },
+      { name: "Text files", extensions: ["txt", "md", "markdown", "ps1", "psm1", "psd1", "bat", "cmd", "do", "ado", "py", "pyw", "r", "sql", "sh", "bash", "html", "htm", "xml", "json", "yaml", "yml", "toml", "ini", "cfg", "conf", "csv", "tsv", "svg", "diff", "patch", "log"] },
       { name: "All files", extensions: ["*"] }
     ]
   });
