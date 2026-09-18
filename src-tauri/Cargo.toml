@@ -2,8 +2,9 @@
 name = "quietpad"
 version = "0.1.0"
 description = "A small, quiet Windows text editor."
-authors = ["QuietPad"]
+authors = ["Tao Zhang"]
 edition = "2021"
+license = "MIT"
 
 [lib]
 name = "quietpad_lib"
