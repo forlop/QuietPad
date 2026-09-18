@@ -350,12 +350,11 @@ function previewKind(): PreviewKind {
   if (lower.endsWith(".tsv")) return "tsv";
   if (lower.endsWith(".json")) return "json";
   if (lower.endsWith(".svg")) return "svg";
-  if (chosenLanguage === "markdown") return "markdown";
-  return "code";
+  return effectiveLanguage() === "markdown" ? "markdown" : "code";
 }
 
 function hljsLanguage(): string | null {
-  const language = chosenLanguage === "auto" ? detectLanguage(currentPath) : chosenLanguage;
+  const language = effectiveLanguage();
   const map: Partial<Record<LanguageId, string>> = {
     powershell: "powershell", batch: "dos", python: "python", sql: "sql",
     yaml: "yaml", r: "r", shell: "bash", toml: "ini", ini: "ini", diff: "diff",
@@ -651,8 +650,18 @@ const view = new EditorView({
   })
 });
 
+// The language actually in effect: the manual override, or auto-detection. A
+// fresh unsaved buffer has no extension to detect from, so in Auto mode it is
+// treated as Markdown — you're almost always writing prose in a new QuietPad.
+function effectiveLanguage(): Exclude<LanguageId, "auto"> {
+  if (chosenLanguage !== "auto") return chosenLanguage;
+  const detected = detectLanguage(currentPath);
+  if (detected === "text" && !currentPath) return "markdown";
+  return detected;
+}
+
 function languageExtension(): Extension {
-  const language = chosenLanguage === "auto" ? detectLanguage(currentPath) : chosenLanguage;
+  const language = effectiveLanguage();
   switch (language) {
     case "markdown": return markdown();
     case "powershell": return powershellLanguage;
