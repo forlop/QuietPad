@@ -538,7 +538,9 @@ function buildExportDocument(): string {
 <style>${katexCss}</style>
 <style>
   @page { size: A4; margin: 16mm; }
+  html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   body { margin: 0; color: ${p.text}; background: ${p.bg};
+    -webkit-print-color-adjust: exact; print-color-adjust: exact;
     font-family: Georgia, "Times New Roman", serif; line-height: 1.7; }
   main { max-width: 100%; }
   h1, h2, h3, h4 { line-height: 1.25; color: ${p.heading}; }
@@ -1049,6 +1051,13 @@ exportSelect.addEventListener("change", () => {
   if (choice === "html") void exportHtml();
 });
 
+// The preview mirrors the export background, so the control is visible (and the
+// preview is a true preview of the exported page): Paper = white, else theme.
+function applyPreviewBackground() {
+  previewPane.dataset.bg = exportBg.value;
+}
+exportBg.addEventListener("change", applyPreviewBackground);
+
 wrapToggle.addEventListener("change", () => {
   view.dispatch({
     effects: wrapCompartment.reconfigure(wrapToggle.checked ? EditorView.lineWrapping : [])
@@ -1100,6 +1109,7 @@ void appWindow.onCloseRequested(async (event) => {
 });
 
 document.body.dataset.theme = theme;
+applyPreviewBackground();
 applyViewMode(viewMode);
 updateDirtyState();
 updateCursorStatus();

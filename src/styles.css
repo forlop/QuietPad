@@ -486,6 +486,27 @@ body[data-view="preview"] .editor-host {
   }
 }
 
+/* Paper background: scope a light "document" palette to the preview subtree,
+   matching the export "Paper" option so the preview is WYSIWYG. */
+.preview-pane[data-bg="paper"] {
+  --code-bg: #ffffff;
+  --text: #1c1a16;
+  --panel: #f4efe8;
+  --panel-border: #cfc7b8;
+  --muted: #6d6149;
+  --accent: #a14f2a;
+  --accent-soft: #f2d7c7;
+  --syntax-comment: #9a6b45;
+  --syntax-keyword: #7f4f8f;
+  --syntax-string: #9d3f3a;
+  --syntax-number: #27745f;
+  --syntax-variable: #2b241b;
+  --syntax-function: #2f6281;
+  --syntax-property: #6d6149;
+  --syntax-label: #8b6128;
+  --syntax-heading: #2b241b;
+}
+
 /* ---- Preview pane content ---- */
 .preview-pane {
   font-family: "Segoe UI", "Noto Sans", sans-serif;
