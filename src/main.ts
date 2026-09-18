@@ -1,6 +1,7 @@
 import "./styles.css";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { EditorState, Compartment, Extension, RangeSetBuilder, StateEffect, StateField } from "@codemirror/state";
 import { Decoration, DecorationSet, EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter } from "@codemirror/view";
@@ -266,7 +267,9 @@ function updateDirtyState() {
   const dirty = currentText() !== cleanText;
   fileName.textContent = `${dirty ? "*" : ""}${displayName(currentPath)}`;
   renderStatus();
-  document.title = `${dirty ? "*" : ""}${displayName(currentPath)} - QuietPad`;
+  const title = `${dirty ? "*" : ""}${displayName(currentPath)} - QuietPad`;
+  document.title = title;
+  void appWindow.setTitle(title);
 }
 
 function updateCursorStatus() {
@@ -408,6 +411,23 @@ async function newFile() {
   reconfigureLanguage();
 }
 
+// Load a known path into the editor (from the dialog, launch args, or a file
+// opened while QuietPad is already running). Guards unsaved changes first.
+async function openPath(path: string) {
+  if (!(await ensureSaved())) return;
+  try {
+    const text = await readFile(path);
+    currentPath = path;
+    clearError();
+    replaceDocument(text);
+    await rememberDiskState(path);
+    reconfigureLanguage();
+    void appWindow.setFocus();
+  } catch (error) {
+    showError(String(error));
+  }
+}
+
 async function openFile() {
   if (!(await ensureSaved())) return;
   const selected = await open({
@@ -418,6 +438,7 @@ async function openFile() {
     ]
   });
   if (typeof selected !== "string") return;
+  // Buffer already reconciled above; load without re-prompting.
   try {
     const text = await readFile(selected);
     currentPath = selected;
@@ -578,3 +599,16 @@ updateCursorStatus();
 window.setInterval(() => {
   void checkExternalFileChange();
 }, 3000);
+
+// A file opened while QuietPad is already running (e.g. double-clicking another
+// .txt) is forwarded by the single-instance plugin as an "open-file" event.
+void listen<string>("open-file", (event) => {
+  if (event.payload) void openPath(event.payload);
+});
+
+// A file QuietPad was launched with (file association / "Open with").
+void invoke<string | null>("take_launch_file")
+  .then((path) => {
+    if (path) void openPath(path);
+  })
+  .catch(() => undefined);
