@@ -28,20 +28,24 @@
               <option value="markdown">Markdown</option>
             </select>
           </label>
-          <label class="select-label">
-            <span>View</span>
-            <select id="view-select">
-              <option value="edit">Edit</option>
-              <option value="split">Split</option>
-              <option value="preview">Preview</option>
-            </select>
-          </label>
+          <div class="segmented" role="group" aria-label="View">
+            <button id="view-edit" type="button" data-view="edit">Edit</button>
+            <button id="view-split" type="button" data-view="split">Split</button>
+            <button id="view-preview" type="button" data-view="preview">Preview</button>
+          </div>
           <label class="select-label">
             <span>Export</span>
             <select id="export-select">
               <option value="">Export…</option>
               <option value="pdf">PDF (A4)</option>
               <option value="html">HTML</option>
+            </select>
+          </label>
+          <label class="select-label">
+            <span>Background</span>
+            <select id="export-bg">
+              <option value="paper">Paper</option>
+              <option value="theme">Match theme</option>
             </select>
           </label>
           <label class="check-label">

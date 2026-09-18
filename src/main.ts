@@ -51,8 +51,9 @@ const modalSave = document.querySelector<HTMLButtonElement>("#modal-save")!;
 const modalDiscard = document.querySelector<HTMLButtonElement>("#modal-discard")!;
 const modalCancel = document.querySelector<HTMLButtonElement>("#modal-cancel")!;
 const previewPane = document.querySelector<HTMLElement>("#preview-pane")!;
-const viewSelect = document.querySelector<HTMLSelectElement>("#view-select")!;
+const viewButtons = Array.from(document.querySelectorAll<HTMLButtonElement>(".segmented [data-view]"));
 const exportSelect = document.querySelector<HTMLSelectElement>("#export-select")!;
+const exportBg = document.querySelector<HTMLSelectElement>("#export-bg")!;
 
 const languageCompartment = new Compartment();
 const wrapCompartment = new Compartment();
@@ -425,7 +426,9 @@ function renderPreview() {
 function applyViewMode(mode: ViewMode) {
   viewMode = mode;
   document.body.dataset.view = mode;
-  viewSelect.value = mode;
+  for (const button of viewButtons) {
+    button.setAttribute("aria-pressed", String(button.dataset.view === mode));
+  }
   renderPreview();
 }
 
@@ -434,35 +437,78 @@ function exportName(extension: string): string {
   return `${base}.${extension}`;
 }
 
+interface ExportPalette {
+  bg: string; text: string; panel: string; border: string;
+  accent: string; heading: string; muted: string;
+  comment: string; keyword: string; string: string; number: string;
+  variable: string; func: string; property: string; label: string;
+}
+
+// "paper" = a fixed light document palette (best for print/share). "theme" =
+// the app's current colours, so a dark preview exports as a dark PDF.
+function exportPalette(): ExportPalette {
+  if (exportBg.value === "theme") {
+    const s = getComputedStyle(document.body);
+    const v = (name: string, fallback: string) => s.getPropertyValue(name).trim() || fallback;
+    return {
+      bg: v("--code-bg", "#272722"), text: v("--text", "#e8e0d2"),
+      panel: v("--panel", "#2d2c27"), border: v("--panel-border", "#5f564b"),
+      accent: v("--accent", "#b97a56"), heading: v("--syntax-heading", "#f0dfc9"),
+      muted: v("--muted", "#b8a892"), comment: v("--syntax-comment", "#a07858"),
+      keyword: v("--syntax-keyword", "#c59ac9"), string: v("--syntax-string", "#d08b82"),
+      number: v("--syntax-number", "#80a993"), variable: v("--syntax-variable", "#e8e0d2"),
+      func: v("--syntax-function", "#9bb5c8"), property: v("--syntax-property", "#c4b58e"),
+      label: v("--syntax-label", "#d3b27e")
+    };
+  }
+  return {
+    bg: "#ffffff", text: "#1c1a16", panel: "#f4efe8", border: "#cfc7b8",
+    accent: "#a14f2a", heading: "#2b241b", muted: "#6d6149",
+    comment: "#9a6b45", keyword: "#7f4f8f", string: "#9d3f3a", number: "#27745f",
+    variable: "#2b241b", func: "#2f6281", property: "#6d6149", label: "#8b6128"
+  };
+}
+
 function buildExportDocument(): string {
   const bodyHtml = renderPreviewHtml(currentText(), previewKind(), "export");
   const title = escapeHtml(currentPath ? displayName(currentPath) : "QuietPad document");
+  const p = exportPalette();
   return `<!doctype html>
 <html lang="en"><head><meta charset="UTF-8"><title>${title}</title>
 <style>${katexCss}</style>
 <style>
   @page { size: A4; margin: 16mm; }
-  body { margin: 0; color: #1c1a16; background: #ffffff;
+  body { margin: 0; color: ${p.text}; background: ${p.bg};
     font-family: Georgia, "Times New Roman", serif; line-height: 1.7; }
   main { max-width: 100%; }
-  h1, h2, h3, h4 { line-height: 1.25; }
-  pre { overflow: auto; padding: 12px 14px; border-radius: 8px; background: #f4efe8;
-    font-family: Consolas, "Courier New", monospace; font-size: 12.5px; white-space: pre-wrap;
-    word-break: break-word; }
+  h1, h2, h3, h4 { line-height: 1.25; color: ${p.heading}; }
+  a { color: ${p.func}; }
+  pre { overflow: auto; padding: 12px 14px; border-radius: 8px; background: ${p.panel};
+    border: 1px solid ${p.border}; font-family: Consolas, "Courier New", monospace;
+    font-size: 12.5px; white-space: pre-wrap; word-break: break-word; }
   code { font-family: Consolas, "Courier New", monospace; }
   pre code { background: transparent; }
-  :not(pre) > code { padding: 0.12em 0.35em; border-radius: 4px; background: #f0e9df; }
-  blockquote { margin: 1rem 0; padding: 0.2rem 1rem; border-left: 3px solid #a14f2a;
-    background: rgba(242, 215, 199, 0.35); }
+  :not(pre) > code { padding: 0.12em 0.35em; border-radius: 4px; background: ${p.panel}; }
+  blockquote { margin: 1rem 0; padding: 0.2rem 1rem; border-left: 3px solid ${p.accent};
+    color: ${p.muted}; }
   table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 13px; }
-  th, td { padding: 7px 10px; border: 1px solid #cfc7b8; text-align: left; vertical-align: top; }
-  th { background: #f0e9df; }
+  th, td { padding: 7px 10px; border: 1px solid ${p.border}; text-align: left; vertical-align: top; }
+  th { background: ${p.panel}; }
   img { max-width: 100%; height: auto; }
   .svg-view svg { max-width: 100%; height: auto; }
   .json-view { font-family: Consolas, "Courier New", monospace; font-size: 12.5px; }
   .json-view ul { list-style: none; margin: 0; padding-left: 1.2em; }
-  .json-key { color: #7f4f8f; } .json-string { color: #9d3f3a; }
-  .json-number { color: #27745f; } .json-bool { color: #27745f; } .json-null { color: #8b6128; }
+  .json-key { color: ${p.keyword}; } .json-string { color: ${p.string}; }
+  .json-number, .json-bool { color: ${p.number}; } .json-null { color: ${p.label}; }
+  .json-punct, .json-count { color: ${p.muted}; }
+  .hljs-comment, .hljs-quote { color: ${p.comment}; font-style: italic; }
+  .hljs-keyword, .hljs-selector-tag, .hljs-built_in, .hljs-literal { color: ${p.keyword}; }
+  .hljs-string, .hljs-meta-string { color: ${p.string}; }
+  .hljs-number, .hljs-symbol { color: ${p.number}; }
+  .hljs-variable, .hljs-template-variable, .hljs-attr { color: ${p.variable}; }
+  .hljs-title, .hljs-section { color: ${p.func}; }
+  .hljs-attribute, .hljs-name, .hljs-tag { color: ${p.property}; }
+  .hljs-type, .hljs-class .hljs-title { color: ${p.label}; }
   .katex-display { overflow-x: auto; }
 </style></head>
 <body><main>${bodyHtml}</main></body></html>`;
@@ -903,9 +949,9 @@ languageSelect.addEventListener("change", () => {
   renderPreview();
 });
 
-viewSelect.addEventListener("change", () => {
-  applyViewMode(viewSelect.value as ViewMode);
-});
+for (const button of viewButtons) {
+  button.addEventListener("click", () => applyViewMode(button.dataset.view as ViewMode));
+}
 
 exportSelect.addEventListener("change", () => {
   const choice = exportSelect.value;
