@@ -554,6 +554,8 @@ body[data-view="preview"] .editor-host {
   font-size: 0.9em;
 }
 .code-listing { white-space: pre-wrap; word-break: break-word; }
+/* Whole-file listing is the document itself — no boxed fill/border. */
+.preview-pane pre.code-listing { background: transparent; border: none; padding: 0; }
 
 /* highlight.js token colours mapped to the app palette */
 .hljs-comment, .hljs-quote { color: var(--syntax-comment); font-style: italic; }

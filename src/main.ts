@@ -548,6 +548,8 @@ function buildExportDocument(): string {
   pre { overflow: auto; padding: 12px 14px; border-radius: 8px; background: ${p.panel};
     border: 1px solid ${p.border}; font-family: Consolas, "Courier New", monospace;
     font-size: 12.5px; white-space: pre-wrap; word-break: break-word; }
+  /* A whole-file code listing is the document, not a boxed snippet. */
+  pre.code-listing { background: transparent; border: none; border-radius: 0; padding: 0; }
   code { font-family: Consolas, "Courier New", monospace; }
   pre code { background: transparent; }
   :not(pre) > code { padding: 0.12em 0.35em; border-radius: 4px; background: ${p.panel}; }
