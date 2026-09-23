@@ -18,6 +18,10 @@ param()
 $ErrorActionPreference = "Stop"
 $repo = $PSScriptRoot
 
+# Version drives every artifact name; read it from the Tauri config.
+$ver = (Get-Content (Join-Path $repo "src-tauri\tauri.conf.json") -Raw | ConvertFrom-Json).version
+Write-Host "QuietPad version $ver" -ForegroundColor Cyan
+
 # Resolve the cargo target dir from the cargo config (fallback to the default).
 $targetDir = "D:\work\quietpad-target"
 $cfg = Join-Path $repo "src-tauri\.cargo\config.toml"
@@ -40,8 +44,8 @@ for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
 }
 
 $rel = Join-Path $targetDir "release"
-$setup = Join-Path $rel "bundle\nsis\QuietPad_0.1.0_x64-setup.exe"
-$msi   = Join-Path $rel "bundle\msi\QuietPad_0.1.0_x64_en-US.msi"
+$setup = Join-Path $rel "bundle\nsis\QuietPad_${ver}_x64-setup.exe"
+$msi   = Join-Path $rel "bundle\msi\QuietPad_${ver}_x64_en-US.msi"
 $exe   = Join-Path $rel "quietpad.exe"
 foreach ($f in @($setup, $msi, $exe)) {
     if (-not (Test-Path $f)) { throw "Expected build artifact not found: $f" }
@@ -64,12 +68,16 @@ Start-Sleep -Milliseconds 500
 Write-Host "Copying deliverables back into the repo ..." -ForegroundColor Cyan
 $installers = Join-Path $repo "installers"
 New-Item -ItemType Directory -Force -Path $installers | Out-Null
+# Drop stale artifacts from previous versions so only the current build remains.
+Get-ChildItem $installers -Filter "QuietPad_*_x64-setup.exe" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+Get-ChildItem $installers -Filter "QuietPad_*_x64_en-US.msi" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+Get-ChildItem $repo -Filter "QuietPad_*_x64_portable.zip" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 $portableExe = Join-Path $repo "portable\QuietPad.exe"
-Invoke-WithRetry { Copy-Item $setup (Join-Path $installers "QuietPad_0.1.0_x64-setup.exe") -Force -ErrorAction Stop } "copy setup.exe"
-Invoke-WithRetry { Copy-Item $msi   (Join-Path $installers "QuietPad_0.1.0_x64_en-US.msi")  -Force -ErrorAction Stop } "copy msi"
+Invoke-WithRetry { Copy-Item $setup (Join-Path $installers "QuietPad_${ver}_x64-setup.exe") -Force -ErrorAction Stop } "copy setup.exe"
+Invoke-WithRetry { Copy-Item $msi   (Join-Path $installers "QuietPad_${ver}_x64_en-US.msi")  -Force -ErrorAction Stop } "copy msi"
 Invoke-WithRetry { Copy-Item $exe   $portableExe -Force -ErrorAction Stop } "copy portable exe"
 
-$zip = Join-Path $repo "QuietPad_0.1.0_x64_portable.zip"
+$zip = Join-Path $repo "QuietPad_${ver}_x64_portable.zip"
 Invoke-WithRetry {
     if (Test-Path $zip) { Remove-Item $zip -Force -ErrorAction Stop }
     Compress-Archive -Path $portableExe, (Join-Path $repo "portable\README.txt") `
@@ -78,7 +86,7 @@ Invoke-WithRetry {
 
 Write-Host "Done. Deliverables refreshed:" -ForegroundColor Green
 Get-Item `
-    (Join-Path $installers "QuietPad_0.1.0_x64-setup.exe"),
-    (Join-Path $installers "QuietPad_0.1.0_x64_en-US.msi"),
+    (Join-Path $installers "QuietPad_${ver}_x64-setup.exe"),
+    (Join-Path $installers "QuietPad_${ver}_x64_en-US.msi"),
     (Join-Path $repo "portable\QuietPad.exe"),
     $zip | Select-Object Name, Length, LastWriteTime | Format-Table -AutoSize
