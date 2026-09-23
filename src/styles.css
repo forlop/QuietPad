@@ -424,6 +424,11 @@ body[data-view="preview"] .editor-host {
   font-weight: 600;
 }
 
+#status-left.status-notice {
+  color: var(--accent);
+  font-weight: 700;
+}
+
 .modal-overlay {
   position: fixed;
   inset: 0;

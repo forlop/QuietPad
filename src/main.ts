@@ -53,6 +53,7 @@ const reloadExternal = document.querySelector<HTMLButtonElement>("#reload-extern
 const ignoreExternal = document.querySelector<HTMLButtonElement>("#ignore-external")!;
 const languageSelect = document.querySelector<HTMLSelectElement>("#language-select")!;
 const wrapToggle = document.querySelector<HTMLInputElement>("#wrap-toggle")!;
+const followToggle = document.querySelector<HTMLInputElement>("#follow-toggle")!;
 const findPanel = document.querySelector<HTMLElement>("#find-panel")!;
 const findInput = document.querySelector<HTMLInputElement>("#find-input")!;
 const replaceInput = document.querySelector<HTMLInputElement>("#replace-input")!;
@@ -78,11 +79,12 @@ let currentPath: string | null = null;
 let cleanText = "";
 let chosenLanguage: LanguageId = "auto";
 let viewMode: ViewMode = "edit";
+let followMode = false;
 let theme: "dark" | "light" = "dark";
 let closeConfirmed = false;
-let lastDiskSignature: string | null = null;
-let changedDiskSignature: string | null = null;
-let ignoredDiskSignature: string | null = null;
+let lastDiskText: string | null = null;
+let pendingDiskText: string | null = null;
+let ignoredDiskText: string | null = null;
 let errorMessage: string | null = null;
 let errorTimer: number | null = null;
 
@@ -716,8 +718,8 @@ function replaceDocument(text: string) {
 }
 
 function clearExternalChangeWarning() {
-  changedDiskSignature = null;
-  ignoredDiskSignature = null;
+  pendingDiskText = null;
+  ignoredDiskText = null;
   renderStatus();
 }
 
@@ -743,13 +745,14 @@ function clearError() {
 
 function renderStatus() {
   statusLeft.classList.toggle("status-error", errorMessage !== null);
+  statusLeft.classList.toggle("status-notice", errorMessage === null && pendingDiskText !== null);
   if (errorMessage) {
     statusLeft.textContent = errorMessage;
     reloadExternal.hidden = true;
     ignoreExternal.hidden = true;
     return;
   }
-  if (changedDiskSignature) {
+  if (pendingDiskText !== null) {
     statusLeft.textContent = "File changed on disk";
     reloadExternal.hidden = false;
     ignoreExternal.hidden = false;
@@ -813,10 +816,6 @@ function writeFile(path: string, contents: string) {
   return invoke<void>("write_file", { path, contents });
 }
 
-function fileSignature(path: string) {
-  return invoke<string>("file_signature", { path });
-}
-
 let modalResolver: ((choice: UnsavedChoice) => void) | null = null;
 
 function closeModal(choice: UnsavedChoice) {
@@ -859,31 +858,58 @@ async function ensureSaved(message = "You have unsaved changes."): Promise<boole
   return saveFile(false);
 }
 
-async function rememberDiskState(path: string) {
-  try {
-    lastDiskSignature = await fileSignature(path);
-  } catch {
-    lastDiskSignature = null;
-  }
-  changedDiskSignature = null;
-  ignoredDiskSignature = null;
+// Record the on-disk content as the baseline for change detection. Called right
+// after a read or write, so the buffer already matches disk.
+function rememberDiskState() {
+  lastDiskText = currentText();
+  pendingDiskText = null;
+  ignoredDiskText = null;
   renderStatus();
+}
+
+// Reload the file and jump to the end — the tail-a-log behaviour of Follow mode.
+async function followReload() {
+  if (!currentPath) return;
+  try {
+    const text = await readFile(currentPath);
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: text },
+      selection: { anchor: text.length },
+      scrollIntoView: true
+    });
+    cleanText = currentText();
+    rememberDiskState();
+    updateDirtyState();
+    updateCursorStatus();
+    if (viewMode !== "edit") renderPreview();
+  } catch (error) {
+    showError(String(error));
+  }
 }
 
 async function checkExternalFileChange() {
   if (!currentPath) return;
+  let disk: string;
   try {
-    const signature = await fileSignature(currentPath);
-    if (!lastDiskSignature) {
-      lastDiskSignature = signature;
-      return;
-    }
-    if (signature !== lastDiskSignature && signature !== ignoredDiskSignature) {
-      changedDiskSignature = signature;
-      renderStatus();
-    }
+    // Compare actual bytes rather than mtime/size — the latter can lag on
+    // Windows for a file another process is still appending to (a live log).
+    disk = await readFile(currentPath);
   } catch {
     return;
+  }
+  if (lastDiskText === null) {
+    lastDiskText = disk;
+    return;
+  }
+  if (disk !== lastDiskText && disk !== ignoredDiskText) {
+    // Follow mode auto-reloads and tails, but never clobbers unsaved edits —
+    // if the buffer is dirty it falls back to the reload prompt.
+    if (followMode && currentText() === cleanText) {
+      await followReload();
+    } else {
+      pendingDiskText = disk;
+      renderStatus();
+    }
   }
 }
 
@@ -901,7 +927,7 @@ async function reloadFromDisk() {
   try {
     const text = await readFile(currentPath);
     replaceDocument(text);
-    await rememberDiskState(currentPath);
+    rememberDiskState();
     reconfigureLanguage();
   } catch (error) {
     showError(String(error));
@@ -912,7 +938,7 @@ async function newFile() {
   if (!(await ensureSaved())) return;
   clearError();
   currentPath = null;
-  lastDiskSignature = null;
+  lastDiskText = null;
   clearExternalChangeWarning();
   replaceDocument("");
   reconfigureLanguage();
@@ -927,7 +953,7 @@ async function openPath(path: string) {
     currentPath = path;
     clearError();
     replaceDocument(text);
-    await rememberDiskState(path);
+    rememberDiskState();
     reconfigureLanguage();
     void appWindow.setFocus();
   } catch (error) {
@@ -951,7 +977,7 @@ async function openFile() {
     currentPath = selected;
     clearError();
     replaceDocument(text);
-    await rememberDiskState(selected);
+    rememberDiskState();
     reconfigureLanguage();
   } catch (error) {
     showError(String(error));
@@ -981,7 +1007,7 @@ async function saveFile(forcePicker = false): Promise<boolean> {
   currentPath = target;
   cleanText = currentText();
   clearError();
-  await rememberDiskState(target);
+  rememberDiskState();
   reconfigureLanguage();
   updateDirtyState();
   return true;
@@ -995,8 +1021,8 @@ reloadExternal.addEventListener("click", () => {
   void reloadFromDisk();
 });
 ignoreExternal.addEventListener("click", () => {
-  if (changedDiskSignature) ignoredDiskSignature = changedDiskSignature;
-  changedDiskSignature = null;
+  if (pendingDiskText !== null) ignoredDiskText = pendingDiskText;
+  pendingDiskText = null;
   renderStatus();
 });
 
@@ -1075,6 +1101,15 @@ wrapToggle.addEventListener("change", () => {
   });
 });
 
+followToggle.addEventListener("change", () => {
+  followMode = followToggle.checked;
+  if (followMode && currentPath && currentText() === cleanText) {
+    // Clear any pending prompt and jump to the end right away.
+    pendingDiskText = null;
+    void followReload();
+  }
+});
+
 assistantToggle.addEventListener("click", () => {
   const next = assistantPanel.hidden;
   assistantPanel.hidden = !next;
@@ -1124,9 +1159,12 @@ applyPreviewBackground();
 applyViewMode(viewMode);
 updateDirtyState();
 updateCursorStatus();
-window.setInterval(() => {
-  void checkExternalFileChange();
-}, 3000);
+// Poll for external changes — quicker while following a log, relaxed otherwise.
+async function pollExternalChange() {
+  await checkExternalFileChange();
+  window.setTimeout(() => void pollExternalChange(), followMode ? 1000 : 3000);
+}
+window.setTimeout(() => void pollExternalChange(), 3000);
 
 // A file opened while QuietPad is already running (e.g. double-clicking another
 // .txt) is forwarded by the single-instance plugin as an "open-file" event.
