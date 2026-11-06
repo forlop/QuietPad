@@ -22,13 +22,15 @@ $repo = $PSScriptRoot
 $ver = (Get-Content (Join-Path $repo "src-tauri\tauri.conf.json") -Raw | ConvertFrom-Json).version
 Write-Host "QuietPad version $ver" -ForegroundColor Cyan
 
-# Resolve the cargo target dir from the cargo config (fallback to the default).
+# Resolve the cargo target dir: CARGO_TARGET_DIR wins (machines without D:\work),
+# else the cargo config, else the default.
 $targetDir = "D:\work\quietpad-target"
 $cfg = Join-Path $repo "src-tauri\.cargo\config.toml"
 if (Test-Path $cfg) {
     $m = Select-String -Path $cfg -Pattern '^\s*target-dir\s*=\s*"(.+?)"' | Select-Object -First 1
     if ($m) { $targetDir = $m.Matches[0].Groups[1].Value -replace '/', '\' }
 }
+if ($env:CARGO_TARGET_DIR) { $targetDir = $env:CARGO_TARGET_DIR -replace '/', '\' }
 if (-not (Test-Path $targetDir)) { New-Item -ItemType Directory -Force -Path $targetDir | Out-Null }
 
 Write-Host "Building (target-dir: $targetDir) ..." -ForegroundColor Cyan

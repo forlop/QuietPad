@@ -1,6 +1,6 @@
 [package]
 name = "quietpad"
-version = "0.1.1"
+version = "0.1.2"
 description = "A small, quiet Windows text editor."
 authors = ["Tao Zhang"]
 edition = "2021"

@@ -614,3 +614,21 @@ body[data-view="preview"] .editor-host {
   padding: 12px;
 }
 .svg-view svg { max-width: 100%; height: auto; }
+
+.facts-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 34px;
+  padding: 6px 14px;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  background: var(--panel-strong);
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.facts-bar[hidden] {
+  display: none;
+}

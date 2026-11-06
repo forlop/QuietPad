@@ -10,7 +10,7 @@ import hljs from "highlight.js";
 import katex from "katex";
 import TurndownService from "turndown";
 import { gfm } from "turndown-plugin-gfm";
-import { EditorState, Compartment, Extension, RangeSetBuilder, StateEffect, StateField } from "@codemirror/state";
+import { EditorState, Compartment, Extension, RangeSetBuilder, StateEffect, StateField, Text } from "@codemirror/state";
 import { Decoration, DecorationSet, EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import {
@@ -66,26 +66,47 @@ const modalSave = document.querySelector<HTMLButtonElement>("#modal-save")!;
 const modalDiscard = document.querySelector<HTMLButtonElement>("#modal-discard")!;
 const modalCancel = document.querySelector<HTMLButtonElement>("#modal-cancel")!;
 const previewPane = document.querySelector<HTMLElement>("#preview-pane")!;
+const factsBar = document.querySelector<HTMLElement>("#facts-bar")!;
+const factsText = document.querySelector<HTMLSpanElement>("#facts-text")!;
+const loadWholeButton = document.querySelector<HTMLButtonElement>("#load-whole")!;
 const viewButtons = Array.from(document.querySelectorAll<HTMLButtonElement>(".segmented [data-view]"));
 const exportSelect = document.querySelector<HTMLSelectElement>("#export-select")!;
 const exportBg = document.querySelector<HTMLSelectElement>("#export-bg")!;
 
 const languageCompartment = new Compartment();
 const wrapCompartment = new Compartment();
+const readOnlyCompartment = new Compartment();
 const appWindow = getCurrentWindow();
 const setFindText = StateEffect.define<string>();
 
 let currentPath: string | null = null;
-let cleanText = "";
+// The document as last loaded/saved. Compared with Text.eq, which skips the
+// subtrees an edit left shared, so the dirty check stays cheap on big files.
+let cleanDoc: Text = Text.empty;
+let dirty = false;
 let chosenLanguage: LanguageId = "auto";
 let viewMode: ViewMode = "edit";
 let followMode = false;
 let theme: "dark" | "light" = "dark";
 let closeConfirmed = false;
-let lastDiskText: string | null = null;
-let pendingDiskText: string | null = null;
-let ignoredDiskText: string | null = null;
+// Content hashes (computed in Rust) of the file on disk: the baseline, a newer
+// version waiting for Reload/Ignore, and one the user chose to ignore.
+let lastDiskHash: string | null = null;
+let pendingDiskHash: string | null = null;
+let ignoredDiskHash: string | null = null;
 let errorMessage: string | null = null;
+
+// Large files open as a read-only excerpt: the first EXCERPT_LINES lines, with
+// the next batch read when the user scrolls near the bottom. QuietPad is a
+// quick look at big data files, not the place to edit them.
+const LARGE_FILE_BYTES = 10 * 1024 * 1024;
+const EXCERPT_LINES = 1000;
+const CHUNK_MAX_BYTES = 2 * 1024 * 1024;
+type Excerpt = { nextOffset: number; eof: boolean; size: number; signature: string; loading: boolean };
+let excerpt: Excerpt | null = null;
+// Facts for the facts bar: byte size and (counted in the background) lines.
+let facts: { path: string; size: number; lines: number | null } | null = null;
+let factsToken = 0;
 let errorTimer: number | null = null;
 
 const quietHighlightStyle = HighlightStyle.define([
@@ -194,34 +215,54 @@ function escapeRegExp(value: string) {
 const matchMark = Decoration.mark({ class: "quiet-search-match" });
 const currentMatchMark = Decoration.mark({ class: "quiet-search-match quiet-search-match-current" });
 
-function buildFindDecorations(state: EditorState, query: string): DecorationSet {
+// Highlighting stops after this many matches; a one-letter query in a 30 MB
+// file would otherwise build millions of decorations.
+const MAX_FIND_MARKS = 20000;
+
+function scanFindMatches(state: EditorState, query: string): number[] {
   const trimmed = query.trim();
-  if (!trimmed) return Decoration.none;
-  const builder = new RangeSetBuilder<Decoration>();
+  if (!trimmed) return [];
   const pattern = new RegExp(escapeRegExp(trimmed), "gi");
   const text = state.doc.toString();
+  const ranges: number[] = [];
+  for (const match of text.matchAll(pattern)) {
+    if (match.index === undefined) continue;
+    ranges.push(match.index, match.index + match[0].length);
+    if (ranges.length >= MAX_FIND_MARKS * 2) break;
+  }
+  return ranges;
+}
+
+function buildFindDecorations(state: EditorState, ranges: number[]): DecorationSet {
+  if (!ranges.length) return Decoration.none;
+  const builder = new RangeSetBuilder<Decoration>();
   // findNext/findPrevious move the selection onto the active match, so the match
   // whose range equals the current selection is the one the user is sitting on.
   const sel = state.selection.main;
-  for (const match of text.matchAll(pattern)) {
-    if (match.index === undefined) continue;
-    const from = match.index;
-    const to = from + match[0].length;
-    const isCurrent = from === sel.from && to === sel.to;
-    builder.add(from, to, isCurrent ? currentMatchMark : matchMark);
+  for (let i = 0; i < ranges.length; i += 2) {
+    const from = ranges[i];
+    const to = ranges[i + 1];
+    builder.add(from, to, from === sel.from && to === sel.to ? currentMatchMark : matchMark);
   }
   return builder.finish();
 }
 
-const findHighlightField = StateField.define<{ query: string; decorations: DecorationSet }>({
-  create: (state) => ({ query: "", decorations: buildFindDecorations(state, "") }),
+type FindState = { query: string; ranges: number[]; decorations: DecorationSet };
+
+const findHighlightField = StateField.define<FindState>({
+  create: () => ({ query: "", ranges: [], decorations: Decoration.none }),
   update(value, transaction) {
     let query = value.query;
     for (const effect of transaction.effects) {
       if (effect.is(setFindText)) query = effect.value;
     }
-    if (transaction.docChanged || transaction.selection || query !== value.query) {
-      return { query, decorations: buildFindDecorations(transaction.state, query) };
+    if (transaction.docChanged || query !== value.query) {
+      const ranges = scanFindMatches(transaction.state, query);
+      return { query, ranges, decorations: buildFindDecorations(transaction.state, ranges) };
+    }
+    // Selection moved only: re-mark the current match, no rescan of the text.
+    if (transaction.selection && value.ranges.length) {
+      return { ...value, decorations: buildFindDecorations(transaction.state, value.ranges) };
     }
     return value;
   },
@@ -375,7 +416,7 @@ function renderMarkdownHtml(text: string, target: "preview" | "export"): string 
 }
 
 // Minimal RFC-4180-ish parser: honors quoted fields and "" escapes.
-function parseDelimited(text: string, delimiter: string): string[][] {
+function parseDelimited(text: string, delimiter: string, maxRows = Infinity): string[][] {
   const rows: string[][] = [];
   let row: string[] = [];
   let field = "";
@@ -394,6 +435,7 @@ function parseDelimited(text: string, delimiter: string): string[][] {
       row.push(field); field = "";
     } else if (ch === "\n") {
       row.push(field); field = ""; rows.push(row); row = [];
+      if (rows.length >= maxRows) return rows.filter((r) => r.length > 1 || (r.length === 1 && r[0] !== ""));
     } else if (ch !== "\r") {
       field += ch;
     }
@@ -402,15 +444,45 @@ function parseDelimited(text: string, delimiter: string): string[][] {
   return rows.filter((r) => r.length > 1 || (r.length === 1 && r[0] !== ""));
 }
 
-function renderTableHtml(text: string, delimiter: string): string {
-  const rows = parseDelimited(text, delimiter);
+// The live preview shows at most this many table rows / characters; the full
+// content is still in the editor (and in exports).
+const PREVIEW_MAX_ROWS = 2000;
+const PREVIEW_MAX_CHARS = 2_000_000;
+
+function previewTruncatedNote(shown: string): string {
+  return `<p class="preview-empty">Preview shows ${shown}.</p>`;
+}
+
+function firstLine(text: string): string {
+  const end = text.indexOf("\n");
+  return (end === -1 ? text : text.slice(0, end)).replace(/\r$/, "");
+}
+
+// Pick the delimiter from the header line: Norwegian exports often use ";".
+function detectDelimiter(header: string): string {
+  const counts: Record<string, number> = { ",": 0, ";": 0, "\t": 0, "|": 0 };
+  let quoted = false;
+  for (const ch of header) {
+    if (ch === '"') quoted = !quoted;
+    else if (!quoted && ch in counts) counts[ch]++;
+  }
+  let best = ",";
+  for (const d of Object.keys(counts)) if (counts[d] > counts[best]) best = d;
+  return best;
+}
+
+function renderTableHtml(text: string, delimiter: string, maxRows = Infinity): string {
+  const rows = parseDelimited(text, delimiter, maxRows === Infinity ? Infinity : maxRows + 1);
   if (!rows.length) return `<p class="preview-empty">No rows.</p>`;
+  const truncated = rows.length > maxRows;
+  if (truncated) rows.length = maxRows;
   const [head, ...body] = rows;
   const ths = head.map((c) => `<th>${escapeHtml(c)}</th>`).join("");
   const trs = body
     .map((r) => `<tr>${r.map((c) => `<td>${escapeHtml(c)}</td>`).join("")}</tr>`)
     .join("");
-  return `<table class="data-table"><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
+  const table = `<table class="data-table"><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
+  return truncated ? previewTruncatedNote(`the first ${maxRows.toLocaleString()} rows`) + table : table;
 }
 
 function renderJsonNode(value: unknown): string {
@@ -469,10 +541,18 @@ function renderCodeHtml(text: string): string {
 }
 
 function renderPreviewHtml(text: string, kind: PreviewKind, target: "preview" | "export"): string {
+  const live = target === "preview";
+  const maxRows = live ? PREVIEW_MAX_ROWS : Infinity;
+  if (live && kind !== "csv" && kind !== "tsv" && text.length > PREVIEW_MAX_CHARS) {
+    // Highlighting / parsing megabytes on every keystroke freezes the window.
+    const head = text.slice(0, PREVIEW_MAX_CHARS);
+    return previewTruncatedNote(`the first ${PREVIEW_MAX_CHARS.toLocaleString()} characters as plain text`)
+      + `<pre class="hljs code-listing"><code>${escapeHtml(head)}</code></pre>`;
+  }
   switch (kind) {
     case "markdown": return renderMarkdownHtml(text, target);
-    case "csv": return renderTableHtml(text, ",");
-    case "tsv": return renderTableHtml(text, "\t");
+    case "csv": return renderTableHtml(text, detectDelimiter(firstLine(text)), maxRows);
+    case "tsv": return renderTableHtml(text, "\t", maxRows);
     case "json": return renderJsonHtml(text);
     case "svg": return renderSvgHtml(text);
     default: return renderCodeHtml(text);
@@ -480,8 +560,24 @@ function renderPreviewHtml(text: string, kind: PreviewKind, target: "preview" | 
 }
 
 function renderPreview() {
+  if (previewTimer !== null) {
+    window.clearTimeout(previewTimer);
+    previewTimer = null;
+  }
   if (viewMode === "edit") return;
   previewPane.innerHTML = renderPreviewHtml(currentText(), previewKind(), "preview");
+}
+
+// While typing, re-render the preview once the user pauses, not per keystroke.
+let previewTimer: number | null = null;
+function schedulePreview() {
+  if (viewMode === "edit") return;
+  if (previewTimer !== null) window.clearTimeout(previewTimer);
+  const delay = view.state.doc.length > 200_000 ? 600 : 150;
+  previewTimer = window.setTimeout(() => {
+    previewTimer = null;
+    renderPreview();
+  }, delay);
 }
 
 function applyViewMode(mode: ViewMode) {
@@ -611,7 +707,7 @@ async function exportHtml() {
 // answer, a web selection) is converted to Markdown source instead of pasted raw.
 const markdownPaste = EditorView.domEventHandlers({
   paste(event, editorView) {
-    if (previewKind() !== "markdown") return false;
+    if (previewKind() !== "markdown" || editorView.state.readOnly) return false;
     const html = event.clipboardData?.getData("text/html");
     if (!html) return false;
     event.preventDefault();
@@ -634,13 +730,16 @@ function baseExtensions(): Extension[] {
     keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
     EditorView.updateListener.of((update) => {
       if (update.docChanged) {
+        dirty = !update.state.doc.eq(cleanDoc);
         updateDirtyState();
-        if (viewMode !== "edit") renderPreview();
+        schedulePreview();
       }
       if (update.selectionSet || update.docChanged) updateCursorStatus();
+      if (update.viewportChanged && excerpt) void maybeLoadNextBatch();
     }),
     languageCompartment.of(languageExtension()),
-    wrapCompartment.of(EditorView.lineWrapping)
+    wrapCompartment.of(EditorView.lineWrapping),
+    readOnlyCompartment.of([])
   ];
 }
 
@@ -712,14 +811,19 @@ function replaceDocument(text: string) {
     changes: { from: 0, to: view.state.doc.length, insert: text },
     selection: { anchor: 0 }
   });
-  cleanText = currentText();
+  markClean();
   updateDirtyState();
   updateCursorStatus();
 }
 
+function markClean() {
+  cleanDoc = view.state.doc;
+  dirty = false;
+}
+
 function clearExternalChangeWarning() {
-  pendingDiskText = null;
-  ignoredDiskText = null;
+  pendingDiskHash = null;
+  ignoredDiskHash = null;
   renderStatus();
 }
 
@@ -745,21 +849,20 @@ function clearError() {
 
 function renderStatus() {
   statusLeft.classList.toggle("status-error", errorMessage !== null);
-  statusLeft.classList.toggle("status-notice", errorMessage === null && pendingDiskText !== null);
+  statusLeft.classList.toggle("status-notice", errorMessage === null && pendingDiskHash !== null);
   if (errorMessage) {
     statusLeft.textContent = errorMessage;
     reloadExternal.hidden = true;
     ignoreExternal.hidden = true;
     return;
   }
-  if (pendingDiskText !== null) {
+  if (pendingDiskHash !== null) {
     statusLeft.textContent = "File changed on disk";
     reloadExternal.hidden = false;
     ignoreExternal.hidden = false;
     return;
   }
-  const dirty = currentText() !== cleanText;
-  statusLeft.textContent = dirty ? "Unsaved changes" : currentPath ? "Saved" : "Ready";
+  statusLeft.textContent = excerpt ? "Read-only excerpt" : dirty ? "Unsaved changes" : currentPath ? "Saved" : "Ready";
   reloadExternal.hidden = true;
   ignoreExternal.hidden = true;
 }
@@ -774,7 +877,6 @@ function displayName(path: string | null) {
 }
 
 function updateDirtyState() {
-  const dirty = currentText() !== cleanText;
   fileName.textContent = `${dirty ? "*" : ""}${displayName(currentPath)}`;
   renderStatus();
   const title = `${dirty ? "*" : ""}${displayName(currentPath)} - QuietPad`;
@@ -808,12 +910,15 @@ function setSearch() {
 
 // Thin wrappers over the Rust commands. These bypass the fs-plugin scope so
 // scripts living outside the user profile (other drives, C:\Scripts, ...) open.
+type OpenedFile = { text: string; hash: string };
+
 function readFile(path: string) {
-  return invoke<string>("read_file", { path });
+  return invoke<OpenedFile>("read_file", { path });
 }
 
+// Resolves to the content hash of what was written.
 function writeFile(path: string, contents: string) {
-  return invoke<void>("write_file", { path, contents });
+  return invoke<string>("write_file", { path, contents });
 }
 
 let modalResolver: ((choice: UnsavedChoice) => void) | null = null;
@@ -851,7 +956,7 @@ modalOverlay.addEventListener("keydown", (event) => {
 
 // Returns true when it is safe to proceed (no changes, saved, or discarded).
 async function ensureSaved(message = "You have unsaved changes."): Promise<boolean> {
-  if (currentText() === cleanText) return true;
+  if (!dirty) return true;
   const choice = await askUnsaved(message);
   if (choice === "cancel") return false;
   if (choice === "discard") return true;
@@ -860,10 +965,10 @@ async function ensureSaved(message = "You have unsaved changes."): Promise<boole
 
 // Record the on-disk content as the baseline for change detection. Called right
 // after a read or write, so the buffer already matches disk.
-function rememberDiskState() {
-  lastDiskText = currentText();
-  pendingDiskText = null;
-  ignoredDiskText = null;
+function rememberDiskState(hash: string) {
+  lastDiskHash = hash;
+  pendingDiskHash = null;
+  ignoredDiskHash = null;
   renderStatus();
 }
 
@@ -871,17 +976,17 @@ function rememberDiskState() {
 async function followReload() {
   if (!currentPath) return;
   try {
-    const text = await readFile(currentPath);
+    const { text, hash } = await readFile(currentPath);
     view.dispatch({
       changes: { from: 0, to: view.state.doc.length, insert: text },
       selection: { anchor: text.length },
       scrollIntoView: true
     });
-    cleanText = currentText();
-    rememberDiskState();
+    markClean();
+    rememberDiskState(hash);
     updateDirtyState();
     updateCursorStatus();
-    if (viewMode !== "edit") renderPreview();
+    renderPreview();
   } catch (error) {
     showError(String(error));
   }
@@ -889,25 +994,41 @@ async function followReload() {
 
 async function checkExternalFileChange() {
   if (!currentPath) return;
+  if (excerpt) {
+    // Hashing a multi-GB file every few seconds is too heavy; mtime+size is
+    // good enough for a read-only excerpt.
+    let sig: string;
+    try {
+      sig = await invoke<string>("file_signature", { path: currentPath });
+    } catch {
+      return;
+    }
+    if (sig !== excerpt.signature && sig !== ignoredDiskHash) {
+      pendingDiskHash = sig;
+      renderStatus();
+    }
+    return;
+  }
   let disk: string;
   try {
-    // Compare actual bytes rather than mtime/size — the latter can lag on
-    // Windows for a file another process is still appending to (a live log).
-    disk = await readFile(currentPath);
+    // Compare a hash of the actual bytes rather than mtime/size — the latter can
+    // lag on Windows for a file another process is still appending to (a live
+    // log). Hashing happens in Rust, so only a short string crosses the bridge.
+    disk = await invoke<string>("file_hash", { path: currentPath });
   } catch {
     return;
   }
-  if (lastDiskText === null) {
-    lastDiskText = disk;
+  if (lastDiskHash === null) {
+    lastDiskHash = disk;
     return;
   }
-  if (disk !== lastDiskText && disk !== ignoredDiskText) {
+  if (disk !== lastDiskHash && disk !== ignoredDiskHash) {
     // Follow mode auto-reloads and tails, but never clobbers unsaved edits —
     // if the buffer is dirty it falls back to the reload prompt.
-    if (followMode && currentText() === cleanText) {
+    if (followMode && !dirty) {
       await followReload();
     } else {
-      pendingDiskText = disk;
+      pendingDiskHash = disk;
       renderStatus();
     }
   }
@@ -915,7 +1036,7 @@ async function checkExternalFileChange() {
 
 async function reloadFromDisk() {
   if (!currentPath) return;
-  if (currentText() !== cleanText) {
+  if (dirty) {
     const choice = await askUnsaved("Reload from disk and discard unsaved changes?");
     if (choice === "cancel") return;
     if (choice === "save") {
@@ -924,41 +1045,183 @@ async function reloadFromDisk() {
       return;
     }
   }
-  try {
-    const text = await readFile(currentPath);
-    replaceDocument(text);
-    rememberDiskState();
-    reconfigureLanguage();
-  } catch (error) {
-    showError(String(error));
-  }
+  await loadPath(currentPath);
 }
 
 async function newFile() {
   if (!(await ensureSaved())) return;
   clearError();
   currentPath = null;
-  lastDiskText = null;
+  lastDiskHash = null;
+  setExcerpt(null);
   clearExternalChangeWarning();
   replaceDocument("");
   reconfigureLanguage();
+  void refreshFacts();
+}
+
+// --- loading -----------------------------------------------------------------
+
+function setExcerpt(next: Excerpt | null) {
+  excerpt = next;
+  view.dispatch({ effects: readOnlyCompartment.reconfigure(next ? EditorState.readOnly.of(true) : []) });
+  followToggle.disabled = next !== null;
+  if (next && followMode) {
+    followMode = false;
+    followToggle.checked = false;
+  }
+  renderFacts();
+}
+
+function readChunk(path: string, offset: number) {
+  return invoke<{ text: string; nextOffset: number; eof: boolean; fileSize: number }>("read_chunk", {
+    path, offset, maxLines: EXCERPT_LINES, maxBytes: CHUNK_MAX_BYTES
+  });
+}
+
+// Open a path: small files whole and editable, large ones as an excerpt.
+// Callers have already dealt with unsaved changes.
+async function loadPath(path: string, forceWhole = false) {
+  try {
+    const signature = await invoke<string>("file_signature", { path });
+    const size = Number(signature.split(":")[1] ?? 0);
+    if (size > LARGE_FILE_BYTES && !forceWhole) {
+      const chunk = await readChunk(path, 0);
+      currentPath = path;
+      clearError();
+      clearExternalChangeWarning();
+      setExcerpt({ nextOffset: chunk.nextOffset, eof: chunk.eof, size: chunk.fileSize, signature, loading: false });
+      replaceDocument(chunk.text);
+      lastDiskHash = null;
+    } else {
+      const { text, hash } = await readFile(path);
+      currentPath = path;
+      clearError();
+      setExcerpt(null);
+      replaceDocument(text);
+      rememberDiskState(hash);
+    }
+    reconfigureLanguage();
+    renderPreview();
+    void refreshFacts();
+    void appWindow.setFocus();
+    // A short first batch may not fill the window; top it up.
+    void maybeLoadNextBatch();
+  } catch (error) {
+    showError(String(error));
+  }
+}
+
+// Append the next batch when the user nears the end of what is loaded.
+async function maybeLoadNextBatch() {
+  const ex = excerpt;
+  if (!ex || ex.eof || ex.loading || !currentPath) return;
+  // The line at the bottom of the screen, from the scroll position. (Not
+  // view.viewport: right after an append it is mapped onto the new end of the
+  // doc until the next measure, which would chain-load batch after batch.)
+  // Load only when the screen reaches the last few hundred loaded lines.
+  const doc = view.state.doc;
+  const dom = view.scrollDOM;
+  const bottom = view.lineBlockAtHeight(dom.scrollTop + dom.clientHeight);
+  const lastShown = doc.lineAt(Math.min(bottom.from, doc.length)).number;
+  if (lastShown < doc.lines - 300) return;
+  ex.loading = true;
+  const path = currentPath;
+  try {
+    const chunk = await readChunk(path, ex.nextOffset);
+    if (excerpt !== ex || currentPath !== path) return; // another file opened meanwhile
+    // Keep the selection where it was: a cursor at the end (Ctrl+End) would
+    // otherwise ride along with each batch and keep pulling in the next one.
+    // Likewise restore the scroll position: CodeMirror keeps a view that sits at
+    // the bottom pinned to the bottom, which would also chain-load.
+    view.dispatch({
+      changes: { from: view.state.doc.length, insert: chunk.text },
+      selection: view.state.selection,
+      effects: view.scrollSnapshot()
+    });
+    markClean();
+    updateDirtyState();
+    ex.nextOffset = chunk.nextOffset;
+    ex.eof = chunk.eof;
+    renderFacts();
+  } catch (error) {
+    showError(String(error));
+  } finally {
+    ex.loading = false;
+  }
+  // Still near the bottom (fast scroll, short lines): keep going.
+  window.requestAnimationFrame(() => void maybeLoadNextBatch());
+}
+
+// --- facts bar -----------------------------------------------------------------
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+}
+
+async function refreshFacts() {
+  const token = ++factsToken;
+  const path = currentPath;
+  const isData = previewKind() === "csv" || previewKind() === "tsv";
+  if (!path || (!excerpt && !isData)) {
+    facts = null;
+    renderFacts();
+    return;
+  }
+  const size = excerpt?.size ?? 0;
+  facts = { path, size, lines: null };
+  renderFacts();
+  try {
+    const result = await invoke<{ size: number; lines: number }>("file_facts", { path });
+    if (token !== factsToken) return;
+    facts = { path, size: result.size, lines: result.lines };
+  } catch {
+    if (token !== factsToken) return;
+  }
+  renderFacts();
+}
+
+function renderFacts() {
+  const kind = previewKind();
+  const isData = kind === "csv" || kind === "tsv";
+  if (!currentPath || (!excerpt && !isData)) {
+    factsBar.hidden = true;
+    return;
+  }
+  const parts: string[] = [];
+  const size = facts?.size || excerpt?.size;
+  if (size) parts.push(formatBytes(size));
+  const lines = facts?.lines;
+  if (isData) {
+    const header = firstLine(view.state.doc.line(1).text);
+    const delimiter = kind === "tsv" ? "\t" : detectDelimiter(header);
+    const columns = parseDelimited(header, delimiter, 1)[0]?.length ?? 0;
+    const name = delimiter === "\t" ? "tab" : delimiter;
+    parts.push(lines == null ? "counting rows…" : `${Math.max(lines - 1, 0).toLocaleString()} rows + header`);
+    parts.push(`${columns.toLocaleString()} columns (delimiter ${name})`);
+  } else {
+    parts.push(lines == null ? "counting lines…" : `${lines.toLocaleString()} lines`);
+  }
+  if (excerpt) {
+    const doc = view.state.doc;
+    // A trailing newline leaves an empty last line that is not a data line.
+    const loaded = doc.lines - (doc.line(doc.lines).length === 0 ? 1 : 0);
+    parts.push(excerpt.eof ? `all ${loaded.toLocaleString()} lines loaded` : `lines 1–${loaded.toLocaleString()} loaded, more on scroll`);
+    parts.push("read-only");
+  }
+  factsText.textContent = parts.join(" · ");
+  loadWholeButton.hidden = !excerpt;
+  factsBar.hidden = false;
 }
 
 // Load a known path into the editor (from the dialog, launch args, or a file
 // opened while QuietPad is already running). Guards unsaved changes first.
 async function openPath(path: string) {
   if (!(await ensureSaved())) return;
-  try {
-    const text = await readFile(path);
-    currentPath = path;
-    clearError();
-    replaceDocument(text);
-    rememberDiskState();
-    reconfigureLanguage();
-    void appWindow.setFocus();
-  } catch (error) {
-    showError(String(error));
-  }
+  await loadPath(path);
 }
 
 async function openFile() {
@@ -972,42 +1235,42 @@ async function openFile() {
   });
   if (typeof selected !== "string") return;
   // Buffer already reconciled above; load without re-prompting.
-  try {
-    const text = await readFile(selected);
-    currentPath = selected;
-    clearError();
-    replaceDocument(text);
-    rememberDiskState();
-    reconfigureLanguage();
-  } catch (error) {
-    showError(String(error));
-  }
+  await loadPath(selected);
 }
 
 // Returns true when the file was written, false on cancel or error.
 async function saveFile(forcePicker = false): Promise<boolean> {
   let target = currentPath;
+  // An excerpt is only part of the file: never write it over the original.
+  if (excerpt) forcePicker = true;
   if (!target || forcePicker) {
     const selected = await save({
-      defaultPath: currentPath ?? "Untitled.txt",
+      defaultPath: excerpt && currentPath ? currentPath.replace(/(\.[^.\\/]+)?$/, "_excerpt$1") : currentPath ?? "Untitled.txt",
       filters: [
         { name: "Text files", extensions: ["txt", "md", "ps1", "bat", "cmd"] },
         { name: "All files", extensions: ["*"] }
       ]
     });
     if (!selected) return false;
+    if (excerpt && currentPath && selected.toLowerCase() === currentPath.toLowerCase()) {
+      showError("This is an excerpt of the file. Save it under a new name.");
+      return false;
+    }
     target = selected;
   }
+  let hash: string;
   try {
-    await writeFile(target, currentText());
+    hash = await writeFile(target, currentText());
   } catch (error) {
     showError(String(error));
     return false;
   }
   currentPath = target;
-  cleanText = currentText();
+  setExcerpt(null);
+  markClean();
   clearError();
-  rememberDiskState();
+  rememberDiskState(hash);
+  void refreshFacts();
   reconfigureLanguage();
   updateDirtyState();
   return true;
@@ -1021,8 +1284,8 @@ reloadExternal.addEventListener("click", () => {
   void reloadFromDisk();
 });
 ignoreExternal.addEventListener("click", () => {
-  if (pendingDiskText !== null) ignoredDiskText = pendingDiskText;
-  pendingDiskText = null;
+  if (pendingDiskHash !== null) ignoredDiskHash = pendingDiskHash;
+  pendingDiskHash = null;
   renderStatus();
 });
 
@@ -1071,6 +1334,10 @@ document.querySelector("#replace-all")?.addEventListener("click", () => {
   replaceAll(view);
 });
 
+loadWholeButton.addEventListener("click", () => {
+  if (currentPath) void loadPath(currentPath, true);
+});
+
 languageSelect.addEventListener("change", () => {
   chosenLanguage = languageSelect.value as LanguageId;
   reconfigureLanguage();
@@ -1103,9 +1370,9 @@ wrapToggle.addEventListener("change", () => {
 
 followToggle.addEventListener("change", () => {
   followMode = followToggle.checked;
-  if (followMode && currentPath && currentText() === cleanText) {
+  if (followMode && currentPath && !dirty) {
     // Clear any pending prompt and jump to the end right away.
-    pendingDiskText = null;
+    pendingDiskHash = null;
     void followReload();
   }
 });

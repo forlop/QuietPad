@@ -31,6 +31,20 @@ The app is shaped so an optional LLM assistant can be added later without turnin
 - **Export** the current view to **PDF (A4)** or **HTML**. PDF is produced via
   a headless Microsoft Edge / Chrome; A4 and margins come from CSS `@page`.
 
+## Large files
+
+QuietPad is a quick viewer for big data files, not a data tool. Files over 10 MB
+open read-only with the first 1,000 lines; the next 1,000 load as you scroll toward
+the end. Only what you look at is read, so a multi-GB file opens instantly.
+
+- A facts bar shows size, row count (counted in the background), columns and the
+  detected delimiter (`,` `;` tab `|`), and how much is loaded. Small CSV/TSV files
+  get the same bar.
+- **Load whole file** switches to the normal, editable editor.
+- Save on an excerpt is Save As only and never overwrites the original.
+- The live preview shows at most 2,000 table rows (or 2 M characters); exports
+  use the whole text.
+
 ## Run
 
 Install dependencies:
@@ -58,8 +72,9 @@ Build a Windows app and refresh the deliverables:
 The repo lives on Dropbox for cross-machine access, but Dropbox locks files in
 `target/` mid-sync and breaks the linker. So the Rust build output goes to a local
 disk instead, configured in [`src-tauri/.cargo/config.toml`](src-tauri/.cargo/config.toml)
-(default `D:\work\quietpad-target`). On a machine without `D:\work`, edit that path
-or delete the file to fall back to the in-tree `./target`.
+(default `D:\work\quietpad-target`). On a machine without `D:\work`, set
+`CARGO_TARGET_DIR` to a local folder (`build.ps1` honours it), edit that path, or
+delete the file to fall back to the in-tree `./target`.
 
 Deliverables (copied back into the Dropbox-synced repo by `build.ps1`):
 
